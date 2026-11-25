@@ -1,6 +1,10 @@
 // Service worker: lets the app shell open quickly and when the connection is weak.
-const CACHE = 'apaaman-v3';
-const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.json'];
+const CACHE = 'apaaman-v8';
+const SHELL = [
+  '/', '/index.html', '/style.css', '/app.js', '/apam-map.svg',
+  '/vendor/leaflet/leaflet.css', '/vendor/leaflet/leaflet.js',
+  '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.json',
+];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));

@@ -14,6 +14,7 @@ const UPLOAD_DIR = path.join(storageRoot, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const CATEGORIES = ['Crops & Food', 'Livestock', 'Tools & Equipment', 'Household', 'Services', 'Other'];
+const COMMUNITY_SECTIONS = ['education', 'jobs', 'health', 'news'];
 const IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const UPLOAD_RE = /^\/uploads\/[a-f0-9]{32}\.(jpg|png|webp|gif)$/;
 const USER_COLS = 'u.id, u.phone, u.name, u.role, u.area, u.bio, u.avatar, u.created_at';
@@ -26,6 +27,7 @@ const io = new Server(server);
 app.disable('x-powered-by');
 app.use((req, res, next) => { res.set('X-Content-Type-Options', 'nosniff'); next(); });
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/vendor/leaflet', express.static(path.join(__dirname, 'node_modules', 'leaflet', 'dist')));
 app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
 app.use('/api', express.json({ limit: '100kb' }));
 
@@ -95,6 +97,77 @@ function recordFailure(phone) {
   if (a.count >= 5) { a.count = 0; a.until = Date.now() + 5 * 60 * 1000; }
   attempts.set(phone, a);
 }
+
+const mapSearchCache = new Map();
+let mapSearchQueue = Promise.resolve();
+let lastMapSearchAt = 0;
+function searchOpenStreetMap(query) {
+  const request = mapSearchQueue.then(async () => {
+    const wait = Math.max(0, 1000 - (Date.now() - lastMapSearchAt));
+    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastMapSearchAt = Date.now();
+
+    const url = new URL('https://nominatim.openstreetmap.org/search');
+    url.search = new URLSearchParams({ q: query, format: 'jsonv2', limit: '5', countrycodes: 'gh' });
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Apaaman/0.1 (+https://apaaman.onrender.com)',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (err) {
+      console.error('OpenStreetMap place search failed:', err);
+      fail('Place search is temporarily unavailable.', 503);
+    }
+    if (!response.ok) {
+      console.error('OpenStreetMap place search returned:', response.status);
+      fail('Place search is temporarily unavailable.', 503);
+    }
+
+    let results;
+    try {
+      results = await response.json();
+    } catch (err) {
+      console.error('OpenStreetMap returned invalid place search data:', err);
+      fail('Place search is temporarily unavailable.', 503);
+    }
+    if (!Array.isArray(results)) fail('Place search is temporarily unavailable.', 503);
+    return results
+      .filter((place) => place && typeof place === 'object' &&
+        Number.isFinite(Number(place.lat)) && Number.isFinite(Number(place.lon)) &&
+        typeof place.display_name === 'string' && place.display_name)
+      .slice(0, 5)
+      .map((place) => ({
+        name: text(place.name || place.display_name.split(',')[0], 80),
+        displayName: text(place.display_name, 200),
+        lat: Number(place.lat),
+        lon: Number(place.lon),
+      }));
+  });
+  mapSearchQueue = request.then(() => undefined, () => undefined);
+  return request;
+}
+
+app.get('/api/map/search', auth, async (req, res, next) => {
+  try {
+    const query = text(req.query.q, 100);
+    if (!query) fail('Enter a place to search for.');
+    const key = query.toLocaleLowerCase();
+    const cached = mapSearchCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return res.json({ places: cached.places });
+    if (cached) mapSearchCache.delete(key);
+
+    const places = await searchOpenStreetMap(query);
+    if (mapSearchCache.size >= 500) mapSearchCache.delete(mapSearchCache.keys().next().value);
+    mapSearchCache.set(key, { places, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
+    return res.json({ places });
+  } catch (err) {
+    next(err);
+  }
+});
 
 app.get('/api/admin/users', auth, requireAdmin, handle((req) => {
   const query = text(req.query.q, 60);
@@ -412,6 +485,67 @@ app.delete('/api/listings/:id', auth, handle((req) => {
   return { ok: true };
 }));
 
+// --------------------------------------------------------- community sections
+const COMMUNITY_POST_SELECT = `SELECT p.*, u.name AS author_name, u.area AS author_area
+  FROM community_posts p JOIN users u ON u.id = p.user_id`;
+
+function communitySection(value) {
+  if (!COMMUNITY_SECTIONS.includes(value)) fail('Community section not found.', 404);
+  return value;
+}
+
+function communityLink(value) {
+  const link = text(value, 500);
+  if (!link) return '';
+  let parsed;
+  try {
+    parsed = new URL(link);
+  } catch {
+    fail('Enter a valid secure web link.');
+  }
+  if (parsed.protocol !== 'https:') fail('Resource links must use HTTPS.');
+  return parsed.href;
+}
+
+app.get('/api/community/:section', auth, handle((req) => {
+  const section = communitySection(req.params.section);
+  return {
+    posts: db.all(
+      `${COMMUNITY_POST_SELECT} WHERE p.section = ? ORDER BY p.id DESC LIMIT 100`, section),
+  };
+}));
+
+app.post('/api/community/:section', auth, handle((req) => {
+  const section = communitySection(req.params.section);
+  if (['education', 'health'].includes(section) && !req.user.is_admin) {
+    fail('Only an administrator can add trusted resources.', 403);
+  }
+  const title = text(req.body.title, 100);
+  const body = text(req.body.body, 3000);
+  if (!title) fail('Please add a title.');
+  if (!body) fail('Please add details.');
+  const organization = section === 'jobs' ? text(req.body.organization, 100) : '';
+  const area = ['jobs', 'news'].includes(section) ? text(req.body.area, 100) : '';
+  const link = communityLink(req.body.link);
+  const result = db.run(
+    `INSERT INTO community_posts (section, user_id, title, body, organization, area, link, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    section, req.user.id, title, body, organization, area, link, Date.now());
+  return { post: db.get(`${COMMUNITY_POST_SELECT} WHERE p.id = ?`, Number(result.lastInsertRowid)) };
+}));
+
+app.delete('/api/community/:id', auth, handle((req) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) fail('Post not found.', 404);
+  const post = db.get('SELECT id, user_id FROM community_posts WHERE id = ?', id);
+  if (!post) fail('Post not found.', 404);
+  if (post.user_id !== req.user.id && !req.user.is_admin) {
+    fail('You can only remove your own post.', 403);
+  }
+  db.run('DELETE FROM community_posts WHERE id = ?', id);
+  return { ok: true };
+}));
+
 // ---------------------------------------------------------------- rides
 const RIDE_SELECT = `SELECT r.*, u.name AS owner_name, u.phone AS owner_phone, u.area AS owner_area,
   u.avatar AS owner_avatar, a.name AS accepted_name, a.phone AS accepted_phone
@@ -420,12 +554,25 @@ const RIDE_SELECT = `SELECT r.*, u.name AS owner_name, u.phone AS owner_phone, u
 
 app.get('/api/rides', auth, handle((req) => {
   const mine = req.query.mine === '1';
-  const where = mine
-    ? '(r.user_id = ? OR r.accepted_by = ?)'
-    : '(r.status = ?)';
+  const pickup = text(req.query.pickup, 120);
+  const destination = text(req.query.destination, 120);
+  const kind = ['offer', 'request'].includes(req.query.kind) ? req.query.kind : '';
+  const where = [mine ? '(r.user_id = ? OR r.accepted_by = ?)' : 'r.status = ?'];
   const params = mine ? [req.user.id, req.user.id] : ['open'];
+  if (!mine && kind) {
+    where.push('r.kind = ?');
+    params.push(kind);
+  }
+  if (pickup) {
+    where.push('instr(lower(r.pickup), lower(?)) > 0');
+    params.push(pickup);
+  }
+  if (destination) {
+    where.push('instr(lower(r.destination), lower(?)) > 0');
+    params.push(destination);
+  }
   return {
-    rides: db.all(`${RIDE_SELECT} WHERE ${where} ORDER BY r.id DESC LIMIT 200`, ...params),
+    rides: db.all(`${RIDE_SELECT} WHERE ${where.join(' AND ')} ORDER BY r.id DESC LIMIT 200`, ...params),
   };
 }));
 

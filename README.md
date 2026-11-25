@@ -21,6 +21,10 @@ On a new installation, optionally set `APAAMAN_ADMIN_PHONE` and `APAAMAN_ADMIN_P
 
 The SQLite database and uploaded images are stored locally in `data/` and `uploads/`. Back them up, and use persistent storage when deploying. Set `APAAMAN_STORAGE_DIR` to the mounted disk's path to keep both directories on that disk.
 
+## Community sections
+
+The Dashboard links to Education, Jobs, Health, and News. Administrators curate Education and Health resources; signed-in members can post job openings and community updates. Resource links must use HTTPS. Members can remove their own posts, and administrators can remove any post.
+
 ## Admin-assisted PIN recovery
 
 Users who forget their PIN must contact a community administrator through a trusted channel. The administrator can search for the account and issue a random temporary PIN; the user must change it before accessing the app. Administrators should independently verify the account holder before resetting a PIN and share temporary PINs privately.
@@ -34,3 +38,7 @@ The root `render.yaml` configures a Node web service in Frankfurt with a 1 GB pe
 ## Install on mobile
 
 Deploy behind HTTPS, then open the site on your phone. On Android, choose **Install app** from the app screen or browser menu. On iPhone or iPad, use **Share → Add to Home Screen** in Safari. The installed app uses the same site, account, and server data.
+
+The Rides page opens on live OpenStreetMap tiles centered on Apam when online; the bundled offline map remains available with **Offline map**. The place-search bar remains visible in either map mode, though searches require an internet connection. Search for places in Ghana or tap **My location** to request location access. Online map tiles and searches are not cached for offline use. A place-search query is sent to OpenStreetMap's Nominatim service. Location is requested only after you tap **My location**; Apaaman does not send or save your coordinates, but OpenStreetMap can infer the approximate area you view from its tile requests. Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), available under the Open Database License (ODbL) 1.0.
+
+Riders can post pickup and destination requests, while drivers can search open ride requests and accept them. Riders can also search driver offers by route and request a match. Both sides can see the matched status and update the trip status; the app does not provide live driver tracking or payments.

@@ -90,6 +90,19 @@ db.exec(`
     created_at  INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_rides_status ON rides(status, id);
+
+  CREATE TABLE IF NOT EXISTS community_posts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    section     TEXT NOT NULL CHECK (section IN ('education', 'jobs', 'health', 'news')),
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    organization TEXT NOT NULL DEFAULT '',
+    area        TEXT NOT NULL DEFAULT '',
+    link        TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_community_posts_section ON community_posts(section, id);
 `);
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all();

@@ -4,6 +4,28 @@
 const $app = document.getElementById('app');
 const CATEGORIES = ['Crops & Food', 'Livestock', 'Tools & Equipment', 'Household', 'Services', 'Other'];
 const CAT_ICON = { 'Crops & Food': '🌾', Livestock: '🐐', 'Tools & Equipment': '🛠️', Household: '🏠', Services: '🤝', Other: '📦' };
+const COMMUNITY_PAGES = {
+  education: {
+    title: 'Education', icon: '📚', description: 'Learning resources selected by community administrators.',
+    emptyTitle: 'No education resources yet', emptyText: 'Check back later for trusted learning resources.',
+    adminOnly: true, postTitle: 'Add an education resource', postAction: 'Add resource',
+  },
+  jobs: {
+    title: 'Jobs', icon: '💼', description: 'Find local opportunities or share a job opening with the community.',
+    emptyTitle: 'No job openings yet', emptyText: 'Be the first to share a local job opening.',
+    postTitle: 'Post a job opening', postAction: 'Post a job',
+  },
+  health: {
+    title: 'Health', icon: '🩺', description: 'Trusted health information and local resources curated by administrators.',
+    emptyTitle: 'No health resources yet', emptyText: 'Check back later for trusted health resources.',
+    adminOnly: true, postTitle: 'Add a health resource', postAction: 'Add resource',
+  },
+  news: {
+    title: 'News', icon: '📰', description: 'Share useful community announcements and local updates.',
+    emptyTitle: 'No community news yet', emptyText: 'Share the first update with your community.',
+    postTitle: 'Share a community update', postAction: 'Share update',
+  },
+};
 const COLORS = ['#1f7a4d', '#c2571a', '#2a6f97', '#8e44ad', '#b5838d', '#6a994e', '#bc4749', '#b8860b'];
 const isTouch = matchMedia('(pointer: coarse)').matches;
 
@@ -12,6 +34,7 @@ let me = null;
 let socket = null;
 let convs = [];
 let chat = null;          // state of the open chat screen
+let rideMapCleanup = null;
 let renderSeq = 0;        // guards against slow screens overwriting newer ones
 const market = { q: '', cat: '' };
 let peopleQ = '';
@@ -218,12 +241,12 @@ function route() {
   return { name: name || 'chats', param };
 }
 
-const TAB_FOR = { chats: 'chats', chat: 'chats', newgroup: 'chats', market: 'market', listing: 'market', sell: 'market', rides: 'rides', ride: 'rides', newride: 'rides', people: 'people', person: 'people', me: 'me', admin: 'me', 'change-pin': 'me' };
+const TAB_FOR = { dashboard: 'dashboard', education: 'dashboard', jobs: 'dashboard', health: 'dashboard', news: 'dashboard', newcommunity: 'dashboard', chats: 'chats', chat: 'chats', newgroup: 'chats', market: 'market', listing: 'market', sell: 'market', rides: 'rides', ride: 'rides', newride: 'rides', people: 'people', person: 'people', me: 'dashboard', admin: 'dashboard', 'change-pin': 'dashboard' };
 
 function bottomNav() {
   const active = TAB_FOR[route().name] || 'chats';
   const unread = convs.reduce((s, c) => s + (c.unread || 0), 0);
-  const tabs = [['chats', '💬', 'Chats'], ['market', '🛒', 'Market'], ['rides', '🚗', 'Rides'], ['people', '👥', 'People'], ['me', '👤', 'Me']];
+  const tabs = [['chats', '💬', 'Chats'], ['market', '🛒', 'Market'], ['rides', '🚗', 'Rides'], ['people', '👥', 'People'], ['dashboard', '📊', 'Dashboard']];
   return h('nav', { class: 'bottomnav' }, tabs.map(([key, icon, label]) =>
     h('a', { href: `#/${key}`, class: active === key ? 'active' : '' },
       h('span', { class: 'ic' }, icon, key === 'chats' && unread ? h('span', { class: 'badge' }, unread > 99 ? '99+' : unread) : null),
@@ -237,10 +260,14 @@ function updateNav() {
 
 function layout(title, content, { back, actions = [], nav = true, subtitle, titleHref, fixed = false } = {}) {
   const heading = h('h1', {}, title);
+  const profileLink = me
+    ? h('a', { class: 'topbar-profile', href: '#/me', 'aria-label': 'Me', title: 'Me' },
+      avatar(me, 32), h('span', {}, 'Me'))
+    : null;
   const header = h('header', { class: 'topbar' },
     back ? h('button', { class: 'icon-btn', 'aria-label': 'Back', onclick: () => { location.hash = back; } }, '‹') : null,
     h('div', { class: 'title' }, titleHref ? h('a', { href: titleHref }, heading) : heading, subtitle ? h('small', {}, subtitle) : null),
-    h('div', { class: 'actions' }, actions));
+    h('div', { class: 'actions' }, actions, profileLink));
   const main = h('main', { class: fixed ? 'fixed' : '' }, content);
   $app.replaceChildren(header, main, nav ? bottomNav() : '');
   return main;
@@ -249,6 +276,10 @@ function layout(title, content, { back, actions = [], nav = true, subtitle, titl
 async function render() {
   const seq = ++renderSeq;
   const alive = () => seq === renderSeq;
+  if (rideMapCleanup) {
+    rideMapCleanup();
+    rideMapCleanup = null;
+  }
   chat = null;
 
   if (!token) return route().name === 'forgot-pin' ? renderForgotPin() : renderAuth('login');
@@ -269,6 +300,12 @@ async function render() {
     if (name === 'change-pin') { location.hash = '#/me'; return; }
     const id = Number(param);
     switch (name) {
+      case 'dashboard': return await renderDashboard(alive);
+      case 'education':
+      case 'jobs':
+      case 'health':
+      case 'news': return await renderCommunitySection(name, alive);
+      case 'newcommunity': return renderCommunityComposer(param);
       case 'chat': return await renderChat(id, alive);
       case 'newgroup': return await renderNewGroup(alive);
       case 'market': return await renderMarket(alive);
@@ -499,6 +536,160 @@ async function renderChats(alive) {
     : empty('💬', 'No chats yet', 'Find someone in People and send them a message, or start a group.',
       h('a', { class: 'btn primary', href: '#/people' }, 'Find people'));
   layout('Chats', content, { actions: [h('a', { class: 'btn small', href: '#/newgroup' }, '+ Group')] });
+}
+
+async function renderDashboard(alive) {
+  const [{ rides }, { listings }] = await Promise.all([
+    api('GET', '/api/rides?mine=1'),
+    api('GET', '/api/listings?mine=1'),
+  ]);
+  if (!alive()) return;
+  const unread = convs.reduce((sum, conversation) => sum + (conversation.unread || 0), 0);
+  const openRides = rides.filter((ride) => ride.status === 'open').length;
+  const matchedRides = rides.filter((ride) => ride.status === 'accepted').length;
+  const activeListings = listings.filter((listing) => listing.status === 'active').length;
+  const stat = (label, value) => h('div', { class: 'card dashboard-stat' },
+    h('strong', {}, value), h('span', {}, label));
+  const action = (icon, label, href) => h('a', { class: 'card dashboard-action', href },
+    h('span', { class: 'dashboard-action-icon' }, icon), h('strong', {}, label), h('span', {}, '›'));
+  const content = h('div', { class: 'dashboard-page' },
+    h('section', { class: 'dashboard-welcome card' },
+      h('span', { class: 'muted small' }, 'Welcome back'),
+      h('h2', {}, me.name),
+      h('p', { class: 'muted' }, 'Your Apaaman community at a glance.')),
+    h('section', {},
+      h('h2', { class: 'dashboard-section-title' }, 'Overview'),
+      h('div', { class: 'dashboard-stats' },
+        stat('Unread messages', unread),
+        stat('Open rides', openRides),
+        stat('Matched rides', matchedRides),
+        stat('Active listings', activeListings))),
+    h('section', {},
+      h('h2', { class: 'dashboard-section-title' }, 'Quick actions'),
+      h('div', { class: 'dashboard-actions' },
+        action('🚗', 'Find or request a ride', '#/rides'),
+        action('🛒', 'Browse the market', '#/market'),
+        action('👥', 'Find people', '#/people'),
+        action('💬', 'Open chats', '#/chats'))),
+    h('section', {},
+      h('h2', { class: 'dashboard-section-title' }, 'Community'),
+      h('div', { class: 'dashboard-actions' },
+        action('📚', 'Education', '#/education'),
+        action('💼', 'Jobs', '#/jobs'),
+        action('🩺', 'Health', '#/health'),
+        action('📰', 'News', '#/news'))));
+  layout('Dashboard', content);
+}
+
+function communityPostCard(section, post) {
+  const canDelete = post.user_id === me.id || me.is_admin;
+  const actions = [];
+  if (section === 'jobs' && post.user_id !== me.id) {
+    actions.push(h('button', {
+      class: 'btn small',
+      onclick: safe(() => messageUser(post.user_id, `Hi, I'm interested in "${post.title}".`)),
+    }, '💬 Contact poster'));
+  }
+  if (post.link) {
+    actions.push(h('a', {
+      class: 'btn small', href: post.link, target: '_blank', rel: 'noopener noreferrer',
+    }, 'Open resource'));
+  }
+  if (canDelete) {
+    actions.push(h('button', {
+      class: 'btn small danger',
+      onclick: safe(async () => {
+        if (!confirm('Remove this post?')) return;
+        await api('DELETE', `/api/community/${post.id}`);
+        toast('Post removed');
+        await renderCommunitySection(section, () => true);
+      }),
+    }, 'Delete'));
+  }
+  const details = [
+    section === 'jobs' ? post.organization : '',
+    post.area,
+    post.user_id === me.id ? 'Posted by you' : `Posted by ${post.author_name}`,
+    fmtTime(post.created_at),
+  ].filter(Boolean).join(' · ');
+  return h('article', { class: 'card community-post' },
+    h('h3', {}, post.title),
+    details ? h('div', { class: 'muted small community-post-meta' }, details) : null,
+    h('p', { class: 'community-post-body' }, post.body),
+    actions.length ? h('div', { class: 'community-post-actions' }, actions) : null);
+}
+
+async function renderCommunitySection(section, alive) {
+  const page = COMMUNITY_PAGES[section];
+  if (!page) { location.hash = '#/dashboard'; return; }
+  const { posts } = await api('GET', `/api/community/${section}`);
+  if (!alive()) return;
+  const canPost = !page.adminOnly || me.is_admin;
+  const list = h('div', { class: 'community-posts' },
+    ...(posts.length
+      ? posts.map((post) => communityPostCard(section, post))
+      : [empty(page.icon, page.emptyTitle, canPost
+        ? page.emptyText
+        : 'Only an administrator can add trusted resources.',
+      canPost ? h('a', { class: 'btn primary', href: `#/newcommunity/${section}` }, page.postAction) : null)]));
+  const content = h('div', { class: 'community-page' },
+    h('section', { class: 'card community-intro' },
+      h('p', {}, page.description),
+      section === 'health' ? h('p', { class: 'muted small' }, 'For urgent or personal medical concerns, contact a qualified health professional.') : null),
+    canPost ? h('div', { class: 'community-page-action' },
+      h('a', { class: 'btn primary', href: `#/newcommunity/${section}` }, `+ ${page.postAction}`)) : null,
+    list);
+  layout(page.title, content, { back: '#/dashboard' });
+}
+
+function renderCommunityComposer(section) {
+  const page = COMMUNITY_PAGES[section];
+  if (!page) { location.hash = '#/dashboard'; return; }
+  if (page.adminOnly && !me.is_admin) {
+    layout('Admin access required', h('div', { class: 'pad' },
+      h('p', { class: 'muted' }, 'Only an administrator can add trusted resources.')),
+    { back: `#/${section}` });
+    return;
+  }
+  const form = h('form', {
+    class: 'form pad',
+    onsubmit: safe(async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type=submit]');
+      button.disabled = true;
+      try {
+        await api('POST', `/api/community/${section}`, Object.fromEntries(new FormData(form)));
+        toast('Posted successfully');
+        location.hash = `#/${section}`;
+      } finally {
+        button.disabled = false;
+      }
+    }),
+  },
+  field(section === 'jobs' ? 'Job title' : 'Title', h('input', {
+    name: 'title', required: true, maxlength: 100,
+    placeholder: section === 'jobs' ? 'e.g. Shop assistant' : 'Add a clear title',
+  })),
+  section === 'jobs' ? field('Employer or organization', h('input', {
+    name: 'organization', maxlength: 100, placeholder: 'Business or organization name',
+  })) : null,
+  ['jobs', 'news'].includes(section) ? field('Area or location', h('input', {
+    name: 'area', maxlength: 100, placeholder: 'Town, village or area',
+  })) : null,
+  field('Details', h('textarea', {
+    name: 'body', required: true, rows: 5, maxlength: 3000,
+    placeholder: section === 'jobs' ? 'Describe the role and how to apply.' : 'Share useful details.',
+  })),
+  ['education', 'health'].includes(section)
+    ? field('Secure resource link (optional)', h('input', {
+      name: 'link', type: 'url', maxlength: 500, placeholder: 'https://…',
+    }))
+    : field('Website or application link (optional)', h('input', {
+      name: 'link', type: 'url', maxlength: 500, placeholder: 'https://…',
+    })),
+  section === 'health' ? h('p', { class: 'muted small' }, 'Share official or verified resources only. Do not include personal medical details.') : null,
+  h('button', { class: 'btn primary', type: 'submit' }, page.postAction));
+  layout(page.postTitle, form, { back: `#/${section}`, nav: false });
 }
 
 function messageNodes(m, prev) {
@@ -799,29 +990,365 @@ function rideCard(r) {
 
 async function renderRides(alive) {
   const list = h('div', { class: 'rides-list' });
+  let showMap = true;
   let mine = false;
+  let rideFilters = { pickup: '', destination: '', kind: 'offer' };
   const load = async () => {
-    const { rides } = await api('GET', `/api/rides?mine=${mine ? '1' : '0'}`);
+    const params = new URLSearchParams({ mine: mine ? '1' : '0' });
+    if (rideFilters.pickup) params.set('pickup', rideFilters.pickup);
+    if (rideFilters.destination) params.set('destination', rideFilters.destination);
+    if (!mine && rideFilters.kind) params.set('kind', rideFilters.kind);
+    const { rides } = await api('GET', `/api/rides?${params}`);
     if (!alive()) return;
+    const rideType = rideFilters.kind === 'offer' ? 'driver offers' :
+      rideFilters.kind === 'request' ? 'ride requests' : 'rides';
+    const rideTypeArticle = rideFilters.kind === 'offer' ? 'a driver offer' :
+      rideFilters.kind === 'request' ? 'a ride request' : 'a ride';
+    const hasRouteFilter = rideFilters.pickup || rideFilters.destination;
     list.replaceChildren(...(rides.length
       ? rides.map(rideCard)
-      : [empty('🚗', mine ? 'No rides yet' : 'No rides available',
-        mine ? 'Post a ride request or offer a trip.' : 'Be the first to ask for or offer a ride.',
+      : [empty('🚗', mine ? 'No rides yet' : hasRouteFilter ? 'No matching rides' : `No ${rideType} available`,
+        mine ? 'Post a ride request or offer a trip.' :
+          hasRouteFilter ? 'Try another pickup, destination or ride type.' : `Be the first to post ${rideTypeArticle}.`,
         h('a', { class: 'btn primary', href: '#/newride' }, 'Post a ride'))]));
   };
-  const mineBtn = h('button', { type: 'button', class: 'chip', onclick: async (e) => {
-    mine = !mine;
-    e.currentTarget.classList.toggle('active', mine);
-    await load();
-  } }, 'My rides');
-  layout('Rides', [
+  const availableBtn = h('button', {
+    type: 'button',
+    class: 'chip active',
+    onclick: safe(async () => {
+      mine = false;
+      availableBtn.classList.add('active');
+      mineBtn.classList.remove('active');
+      await load();
+    }),
+  }, 'Available');
+  const mineBtn = h('button', {
+    type: 'button',
+    class: 'chip',
+    onclick: safe(async () => {
+      mine = true;
+      availableBtn.classList.remove('active');
+      mineBtn.classList.add('active');
+      await load();
+    }),
+  }, 'My rides');
+  const pickupSearchInput = h('input', {
+    type: 'search', name: 'pickup', maxlength: 120, placeholder: 'Any pickup',
+  });
+  const destinationSearchInput = h('input', {
+    type: 'search', name: 'destination', maxlength: 120, placeholder: 'Any destination',
+  });
+  const rideKindSelect = h('select', { name: 'kind' },
+    h('option', { value: 'offer' }, 'Driver offers'),
+    h('option', { value: 'request' }, 'Ride requests'),
+    h('option', { value: 'all' }, 'All open rides'));
+  const rideSearchForm = h('form', {
+    class: 'ride-search-form',
+    onsubmit: safe(async (event) => {
+      event.preventDefault();
+      rideFilters = {
+        pickup: pickupSearchInput.value.trim(),
+        destination: destinationSearchInput.value.trim(),
+        kind: rideKindSelect.value === 'all' ? '' : rideKindSelect.value,
+      };
+      mine = false;
+      availableBtn.classList.add('active');
+      mineBtn.classList.remove('active');
+      await load();
+    }),
+  },
+  h('label', { class: 'ride-search-field' }, h('span', {}, 'Pickup'), pickupSearchInput),
+  h('label', { class: 'ride-search-field' }, h('span', {}, 'Destination'), destinationSearchInput),
+  h('label', { class: 'ride-search-field' }, h('span', {}, 'Ride type'), rideKindSelect),
+  h('button', { class: 'btn primary', type: 'submit' }, 'Search rides'));
+  const mapImage = h('img', {
+    class: 'apam-map-image',
+    src: '/apam-map.svg',
+    alt: 'Offline street map centered on Apam, Ghana',
+    draggable: 'false',
+  });
+  const onlineMapButton = h('button', {
+    type: 'button',
+    class: 'btn small apam-map-online',
+    onclick: safe(showOnlineMap),
+  }, 'Online map');
+  const offlineMapView = h('div', {
+    class: 'apam-map-view',
+    role: 'region',
+    'aria-label': 'Offline map of Apam, Ghana',
+  },
+  mapImage,
+  onlineMapButton,
+  h('div', { class: 'apam-map-location' },
+    h('strong', {}, 'Apam'),
+    h('span', {}, 'Ghana · Offline map')),
+  h('div', { class: 'apam-map-controls' },
+    h('button', {
+      type: 'button', class: 'btn map-control', 'aria-label': 'Zoom in',
+      onclick: () => setZoom(zoom + 0.5),
+    }, '+'),
+    h('button', {
+      type: 'button', class: 'btn map-control', 'aria-label': 'Zoom out',
+      onclick: () => setZoom(zoom - 0.5),
+    }, '−'),
+    h('button', {
+      type: 'button', class: 'btn map-control map-center', 'aria-label': 'Reset map view',
+      onclick: () => { zoom = 1; offsetX = 0; offsetY = 0; applyMapTransform(); },
+    }, '⌖')),
+  h('div', { class: 'apam-map-attribution' },
+    h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener' },
+      'Map data © OpenStreetMap contributors')));
+  let zoom = 1;
+  let offsetX = 0;
+  let offsetY = 0;
+  let dragStart = null;
+  let onlineMap = null;
+  let searchMarker = null;
+  let locationMarker = null;
+  let tileErrorShown = false;
+  function destroyOnlineMap() {
+    if (onlineMap) {
+      onlineMap.remove();
+      onlineMap = null;
+    }
+    searchMarker = null;
+    locationMarker = null;
+    tileErrorShown = false;
+    searchResults.hidden = true;
+  }
+  function showOfflineMap() {
+    destroyOnlineMap();
+    onlineMapView.hidden = true;
+    offlineMapView.hidden = false;
+  }
+  function applyMapTransform() {
+    const bounds = offlineMapView.getBoundingClientRect();
+    const maxX = (zoom - 1) * bounds.width / 2;
+    const maxY = (zoom - 1) * bounds.height / 2;
+    offsetX = Math.max(-maxX, Math.min(maxX, offsetX));
+    offsetY = Math.max(-maxY, Math.min(maxY, offsetY));
+    mapImage.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${zoom})`;
+  }
+  function setZoom(value) {
+    zoom = Math.max(1, Math.min(3, value));
+    if (zoom === 1) { offsetX = 0; offsetY = 0; }
+    applyMapTransform();
+  }
+  offlineMapView.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('.apam-map-controls, .apam-map-online, .apam-map-attribution')) return;
+    dragStart = { x: event.clientX - offsetX, y: event.clientY - offsetY };
+    offlineMapView.setPointerCapture(event.pointerId);
+    offlineMapView.classList.add('is-dragging');
+  });
+  offlineMapView.addEventListener('pointermove', (event) => {
+    if (!dragStart) return;
+    offsetX = event.clientX - dragStart.x;
+    offsetY = event.clientY - dragStart.y;
+    applyMapTransform();
+  });
+  const stopMapDrag = () => {
+    dragStart = null;
+    offlineMapView.classList.remove('is-dragging');
+  };
+  offlineMapView.addEventListener('pointerup', stopMapDrag);
+  offlineMapView.addEventListener('pointercancel', stopMapDrag);
+
+  const onlineMapCanvas = h('div', { class: 'online-map-canvas' });
+  const searchResults = h('div', { class: 'online-map-results', hidden: true });
+  const searchInput = h('input', {
+    type: 'search',
+    maxlength: 100,
+    placeholder: 'Search places in Ghana',
+    'aria-label': 'Search places in Ghana',
+    autocomplete: 'off',
+  });
+  const searchForm = h('form', {
+    class: 'online-map-search',
+    onsubmit: safe(async (event) => {
+      event.preventDefault();
+      const query = searchInput.value.trim();
+      if (!query) { searchInput.focus(); return; }
+      const button = searchForm.querySelector('button[type=submit]');
+      button.disabled = true;
+      try {
+        if (!navigator.onLine) {
+          toast('Connect to the internet to search places.');
+          return;
+        }
+        if (!onlineMap) await showOnlineMap();
+        if (!onlineMap) return;
+        searchResults.hidden = false;
+        searchResults.replaceChildren(h('div', { class: 'online-map-result', role: 'status' }, 'Searching OpenStreetMap…'));
+        const { places } = await api('GET', `/api/map/search?q=${encodeURIComponent(query)}`);
+        if (!alive()) return;
+        searchResults.replaceChildren(...(places.length
+          ? places.map((place) => h('button', {
+            type: 'button',
+            class: 'online-map-result',
+            onclick: () => {
+              const point = [Number(place.lat), Number(place.lon)];
+              if (!onlineMap || !point.every(Number.isFinite)) return;
+              if (searchMarker) searchMarker.remove();
+              searchMarker = L.circleMarker(point, {
+                radius: 8, color: '#155c39', fillColor: '#1f7a4d', fillOpacity: 1, weight: 3,
+              }).addTo(onlineMap).bindTooltip(place.name);
+              onlineMap.setView(point, 16);
+              searchResults.hidden = true;
+              searchInput.blur();
+            },
+          }, h('strong', {}, place.name), h('small', {}, place.displayName)))
+          : [h('div', { class: 'online-map-result', role: 'status' }, 'No places found in Ghana.')]));
+      } catch (error) {
+        searchResults.replaceChildren(h('div', { class: 'online-map-result', role: 'status' }, error.message));
+        throw error;
+      } finally {
+        button.disabled = false;
+      }
+    }),
+  }, searchInput, h('button', { class: 'btn primary', type: 'submit' }, 'Search'));
+  const searchPanel = h('div', { class: 'online-map-search-panel' }, searchForm, searchResults);
+  const locateButton = h('button', {
+    type: 'button',
+    class: 'btn small online-map-locate',
+    onclick: locateUser,
+  }, 'My location');
+  const offlineModeButton = h('button', {
+    type: 'button',
+    class: 'btn small online-map-mode',
+    onclick: showOfflineMap,
+  }, 'Offline map');
+  const onlineMapView = h('div', {
+    class: 'online-map-view',
+    role: 'region',
+    'aria-label': 'Online OpenStreetMap',
+    hidden: true,
+  }, onlineMapCanvas, offlineModeButton, locateButton);
+  const mapSurface = h('div', {
+    class: 'rides-map-surface',
+    role: 'region',
+    'aria-label': 'Map of Apam, Ghana',
+  }, offlineMapView, onlineMapView, searchPanel);
+
+  async function showOnlineMap() {
+    if (!navigator.onLine) {
+      toast('Connect to the internet to use the online map. The offline map is still available.');
+      return;
+    }
+    if (typeof L === 'undefined') {
+      throw new Error('The online map library is unavailable. You can still use the offline map.');
+    }
+    offlineMapView.hidden = true;
+    onlineMapView.hidden = false;
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    if (!alive() || !showMap) return;
+    try {
+      if (!onlineMap) {
+        onlineMap = L.map(onlineMapCanvas, {
+          zoomControl: false,
+          zoomAnimation: false,
+          fadeAnimation: false,
+          markerZoomAnimation: false,
+        }).setView([5.283297, -0.737975], 15);
+        const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          keepBuffer: 1,
+          attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>',
+        }).addTo(onlineMap);
+        tiles.on('tileerror', () => {
+          if (tileErrorShown) return;
+          tileErrorShown = true;
+          toast('Online map tiles are unavailable. Switch back to the offline map or try again later.');
+        });
+        tiles.on('tileload', () => { tileErrorShown = false; });
+        L.control.zoom({ position: 'topright' }).addTo(onlineMap);
+        const scale = L.control({ position: 'bottomright' });
+        scale.onAdd = function (map) {
+          const maxWidth = 100;
+          const container = L.DomUtil.create('div', 'leaflet-control-scale');
+          const line = L.DomUtil.create('div', 'leaflet-control-scale-line', container);
+          const updateScale = () => {
+            const y = map.getSize().y / 2;
+            const maxMeters = map.distance(
+              map.containerPointToLatLng([0, y]),
+              map.containerPointToLatLng([maxWidth, y]));
+            if (!Number.isFinite(maxMeters) || maxMeters <= 0) return;
+            const magnitude = 10 ** Math.floor(Math.log10(maxMeters));
+            const distance = [1, 2, 2.5, 5, 10]
+              .map((step) => step * magnitude)
+              .filter((step) => step <= maxMeters)
+              .pop() || magnitude / 10;
+            line.style.width = `${Math.max(1, Math.round(distance / maxMeters * maxWidth))}px`;
+            line.textContent = distance < 1000 ? `${distance} m` : `${distance / 1000} km`;
+          };
+          this._updateScale = updateScale;
+          map.on('move zoom resize', updateScale);
+          updateScale();
+          return container;
+        };
+        scale.onRemove = function (map) {
+          map.off('move zoom resize', this._updateScale);
+        };
+        scale.addTo(onlineMap);
+      } else {
+        onlineMap.invalidateSize();
+      }
+    } catch (error) {
+      showOfflineMap();
+      throw error;
+    }
+  }
+  function locateUser() {
+    if (!onlineMap) return;
+    if (!navigator.geolocation) {
+      toast('Location is not available in this browser.');
+      return;
+    }
+    locateButton.disabled = true;
+    navigator.geolocation.getCurrentPosition((position) => {
+      locateButton.disabled = false;
+      if (!onlineMap) return;
+      const point = [position.coords.latitude, position.coords.longitude];
+      if (locationMarker) locationMarker.remove();
+      locationMarker = L.circleMarker(point, {
+        radius: 9, color: '#fff', fillColor: '#2676d2', fillOpacity: 1, weight: 4,
+      }).addTo(onlineMap).bindTooltip('Your location');
+      onlineMap.setView(point, 16);
+    }, (error) => {
+      locateButton.disabled = false;
+      toast(error.code === 1 ? 'Allow location access to center the map.' : 'Could not get your location. Please try again.');
+    }, { enableHighAccuracy: false, maximumAge: 30000, timeout: 12000 });
+  }
+  rideMapCleanup = destroyOnlineMap;
+
+  const listView = h('div', { class: 'rides-list-view', hidden: true },
+    rideSearchForm,
     h('div', { class: 'toolbar' },
       h('div', { class: 'chips' },
-        h('button', { type: 'button', class: 'chip active', onclick: async () => { mine = false; mineBtn.classList.remove('active'); await load(); } }, 'Available'),
+        availableBtn,
         mineBtn)),
-    list,
-  ], { actions: [h('a', { class: 'btn small', href: '#/newride' }, '+ Post')] });
-  await load();
+    list);
+  const toggleView = h('button', {
+    type: 'button',
+    class: 'btn small',
+    onclick: safe(async () => {
+      showMap = !showMap;
+      mapSurface.hidden = !showMap;
+      listView.hidden = showMap;
+      toggleView.textContent = showMap ? 'Find rides' : 'Map';
+      if (showMap && navigator.onLine) await showOnlineMap();
+      else if (showMap) showOfflineMap();
+      else {
+        destroyOnlineMap();
+        await load();
+      }
+    }),
+  }, 'Find rides');
+  layout('Rides', [mapSurface, listView], {
+    subtitle: 'Apam, Ghana',
+    fixed: true,
+    actions: [toggleView, h('a', { class: 'btn small', href: '#/newride' }, 'Request a ride')],
+  });
+  safe(showOnlineMap)();
 }
 
 function renderNewRide() {
@@ -851,7 +1378,7 @@ function renderNewRide() {
   field('Notes', h('textarea', { name: 'notes', rows: 3, maxlength: 500, placeholder: 'Luggage, vehicle, or other details' })),
   h('button', { class: 'btn primary', type: 'submit' }, 'Post ride'));
 
-  layout('Post a ride', form, { back: '#/rides', nav: false });
+  layout('Request or offer a ride', form, { back: '#/rides', nav: false });
 }
 
 async function renderRide(id, alive) {
