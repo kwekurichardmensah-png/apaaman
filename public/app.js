@@ -15,6 +15,16 @@ let chat = null;          // state of the open chat screen
 let renderSeq = 0;        // guards against slow screens overwriting newer ones
 const market = { q: '', cat: '' };
 let peopleQ = '';
+let installPrompt = null;
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  installPrompt = event;
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  toast('Apaaman is installed');
+});
 
 // ------------------------------------------------------------ small helpers
 function h(tag, props, ...kids) {
@@ -808,6 +818,26 @@ async function renderMe(alive) {
     }),
   }, avatar(me, 96), h('span', { class: 'avatar-badge' }, '📷'));
 
+  const installBtn = h('button', {
+    class: 'btn',
+    onclick: safe(async () => {
+      if (installPrompt) {
+        const prompt = installPrompt;
+        installPrompt = null;
+        await prompt.prompt();
+        const result = await prompt.userChoice;
+        if (result.outcome === 'accepted') toast('Apaaman is installing');
+        else toast('You can install Apaaman later from your browser menu');
+      } else if (navigator.standalone || matchMedia('(display-mode: standalone)').matches) {
+        toast('Apaaman is already installed');
+      } else if (/iPad|iPhone|iPod/.test(navigator.userAgent)) {
+        toast('Tap Share, then Add to Home Screen');
+      } else {
+        toast('Choose Install app or Add to Home screen from your browser menu');
+      }
+    }),
+  }, '📲 Install Apaaman');
+
   const form = h('form', {
     class: 'form',
     onsubmit: safe(async (e) => {
@@ -824,6 +854,7 @@ async function renderMe(alive) {
 
   layout('Me', h('div', { class: 'pad' },
     h('div', { class: 'profile' }, avatarBtn, h('h2', {}, me.name), h('div', { class: 'muted' }, me.phone)),
+    navigator.standalone || matchMedia('(display-mode: standalone)').matches ? null : installBtn,
     form,
     h('div', { class: 'section' }, h('h3', {}, 'My listings'),
       listings.length
@@ -838,7 +869,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js').catch((error) => console.error('Apaaman offline support could not start:', error));
 }
 
 render();
