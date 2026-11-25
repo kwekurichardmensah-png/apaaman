@@ -21,6 +21,8 @@ db.exec(`
     name       TEXT NOT NULL,
     pin_hash   TEXT NOT NULL,
     salt       TEXT NOT NULL,
+    pin_reset_required INTEGER NOT NULL DEFAULT 0,
+    is_admin   INTEGER NOT NULL DEFAULT 0,
     role       TEXT NOT NULL DEFAULT '',
     area       TEXT NOT NULL DEFAULT '',
     bio        TEXT NOT NULL DEFAULT '',
@@ -90,7 +92,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_rides_status ON rides(status, id);
 `);
 
-const adminPhone = process.env.APAAMAN_ADMIN_PHONE?.trim();
+const userColumns = db.prepare('PRAGMA table_info(users)').all();
+if (!userColumns.some((column) => column.name === 'pin_reset_required')) {
+  db.exec('ALTER TABLE users ADD COLUMN pin_reset_required INTEGER NOT NULL DEFAULT 0');
+}
+if (!userColumns.some((column) => column.name === 'is_admin')) {
+  db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
+}
+
+const adminPhone = process.env.APAAMAN_ADMIN_PHONE?.replace(/[^\d+]/g, '').slice(0, 20);
 const adminPin = process.env.APAAMAN_ADMIN_PIN;
 if (adminPhone || adminPin) {
   if (!adminPhone || !/^\d{4,6}$/.test(adminPin || '')) {
@@ -101,12 +111,12 @@ if (adminPhone || adminPin) {
   const existingAdmin = db.prepare('SELECT id FROM users WHERE phone = ?').get(adminPhone);
   if (!existingAdmin) {
     db.prepare(
-      `INSERT INTO users (phone, name, pin_hash, salt, role, area, bio, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(adminPhone, 'Administrator', pinHash, salt, 'admin', 'Administration', 'Community administrator', Date.now());
+      `INSERT INTO users (phone, name, pin_hash, salt, is_admin, role, area, bio, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(adminPhone, 'Administrator', pinHash, salt, 1, 'admin', 'Administration', 'Community administrator', Date.now());
   } else {
     db.prepare(
-      `UPDATE users SET name = ?, pin_hash = ?, salt = ?, role = ? WHERE phone = ?`,
+      `UPDATE users SET name = ?, pin_hash = ?, salt = ?, pin_reset_required = 0, is_admin = 1, role = ? WHERE phone = ?`,
     ).run('Administrator', pinHash, salt, 'admin', adminPhone);
   }
 }

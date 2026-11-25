@@ -264,6 +264,9 @@ textarea { resize: vertical; }
 .profile h2 { margin-top: 6px; }
 .profile .btn-row { width: 100%; }
 .profile .section { width: 100%; text-align: left; }
+.admin-account { padding: 14px; border-bottom: 1px solid var(--line); }
+.admin-account:last-child { border-bottom: 0; }
+.admin-pin-result { margin: 8px 0 0; color: var(--green-dark); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .avatar-edit { position: relative; border: 0; background: none; padding: 0; cursor: pointer; }
 .avatar-badge { position: absolute; right: 0; bottom: 0; background: var(--card); border-radius: 50%; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
 

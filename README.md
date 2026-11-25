@@ -21,9 +21,11 @@ On a new installation, optionally set `APAAMAN_ADMIN_PHONE` and `APAAMAN_ADMIN_P
 
 The SQLite database and uploaded images are stored locally in `data/` and `uploads/`. Back them up, and use persistent storage when deploying. Set `APAAMAN_STORAGE_DIR` to the mounted disk's path to keep both directories on that disk.
 
-## SMS PIN recovery
+## Admin-assisted PIN recovery
 
-The login screen provides PIN recovery by SMS. To enable it, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID` as private environment variables in Render. Never commit these values. Recovery phone numbers must be in international `+` format and match the number saved on the account.
+Users who forget their PIN must contact a community administrator through a trusted channel. The administrator can search for the account and issue a random temporary PIN; the user must change it before accessing the app. Administrators should independently verify the account holder before resetting a PIN and share temporary PINs privately.
+
+To enable the admin tools on Render, set `APAAMAN_ADMIN_PHONE` and `APAAMAN_ADMIN_PIN` as private environment variables. Use a phone number and a 4–6 digit PIN that only the administrator knows. The account is created or promoted to administrator when the server starts. Never commit these values or share them in chat.
 
 ## Deploy to Render
 

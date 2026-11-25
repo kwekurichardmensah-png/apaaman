@@ -16,9 +16,7 @@ services:
         value: 22.13.0
       - key: APAAMAN_STORAGE_DIR
         value: /opt/render/project/src/storage
-      - key: TWILIO_ACCOUNT_SID
+      - key: APAAMAN_ADMIN_PHONE
         sync: false
-      - key: TWILIO_AUTH_TOKEN
-        sync: false
-      - key: TWILIO_VERIFY_SERVICE_SID
+      - key: APAAMAN_ADMIN_PIN
         sync: false

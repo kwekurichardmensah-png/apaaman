@@ -218,7 +218,7 @@ function route() {
   return { name: name || 'chats', param };
 }
 
-const TAB_FOR = { chats: 'chats', chat: 'chats', newgroup: 'chats', market: 'market', listing: 'market', sell: 'market', rides: 'rides', ride: 'rides', newride: 'rides', people: 'people', person: 'people', me: 'me' };
+const TAB_FOR = { chats: 'chats', chat: 'chats', newgroup: 'chats', market: 'market', listing: 'market', sell: 'market', rides: 'rides', ride: 'rides', newride: 'rides', people: 'people', person: 'people', me: 'me', admin: 'me', 'change-pin': 'me' };
 
 function bottomNav() {
   const active = TAB_FOR[route().name] || 'chats';
@@ -255,11 +255,18 @@ async function render() {
   try {
     if (!me) {
       me = (await api('GET', '/api/me')).user;
-      await loadConvs();
-      connectSocket();
+      if (!me.pin_reset_required) {
+        await loadConvs();
+        connectSocket();
+      }
       if (!alive()) return;
     }
     const { name, param } = route();
+    if (me.pin_reset_required) {
+      if (name !== 'change-pin') { location.hash = '#/change-pin'; return; }
+      return renderChangePin();
+    }
+    if (name === 'change-pin') { location.hash = '#/me'; return; }
     const id = Number(param);
     switch (name) {
       case 'chat': return await renderChat(id, alive);
@@ -273,6 +280,7 @@ async function render() {
       case 'people': return await renderPeople(alive);
       case 'person': return await renderPerson(id, alive);
       case 'me': return await renderMe(alive);
+      case 'admin': return renderAdminUsers(alive);
       default: return await renderChats(alive);
     }
   } catch (e) {
@@ -314,6 +322,10 @@ function renderAuth(mode) {
       try {
         const body = Object.fromEntries(new FormData(form));
         saveSession(await api('POST', login ? '/api/login' : '/api/register', body));
+        if (me.pin_reset_required) {
+          location.hash = '#/change-pin';
+          return;
+        }
         await loadConvs();
         connectSocket();
         if (location.hash === '#/chats') render(); else location.hash = '#/chats';
@@ -341,83 +353,128 @@ function renderAuth(mode) {
 }
 
 function renderForgotPin() {
-  const requestError = h('p', { class: 'error' });
-  const confirmError = h('p', { class: 'error' });
-  const info = h('p', { class: 'muted small' },
-    'Enter the phone number on your account in international format, including + and country code.');
-  const phoneForm = h('form', {
-    class: 'card auth-card',
-    onsubmit: async (e) => {
-      e.preventDefault();
-      requestError.textContent = '';
-      const button = phoneForm.querySelector('button[type=submit]');
-      button.disabled = true;
-      try {
-        const { message: result } = await api('POST', '/api/password-reset/request', {
-          phone: new FormData(phoneForm).get('phone'),
-        });
-        info.textContent = result;
-        phoneForm.hidden = true;
-        codeForm.hidden = false;
-        codeForm.querySelector('[name=phone]').value = phoneForm.elements.phone.value;
-      } catch (error) {
-        requestError.textContent = error.message;
-      } finally {
-        button.disabled = false;
-      }
-    },
-  },
-  field('Phone number', h('input', {
-    name: 'phone', type: 'tel', autocomplete: 'tel', required: true,
-    maxlength: 20, placeholder: '+233…',
-  })),
-  requestError,
-  h('button', { class: 'btn primary', type: 'submit' }, 'Send verification code'));
+  layout('Forgot PIN?', h('div', { class: 'auth pad' },
+    h('p', { class: 'muted' }, 'PIN resets are handled by a community administrator. Contact an administrator using a trusted channel and give them the phone number on your Apaaman account. They can issue a temporary PIN, which you must change after signing in.'),
+    h('p', { class: 'center small' }, h('a', { href: '#/login' }, 'Back to log in'))),
+  { back: '#/login', nav: false });
+}
 
-  const codeForm = h('form', {
+function renderChangePin() {
+  const error = h('p', { class: 'error' });
+  const form = h('form', {
     class: 'card auth-card',
-    hidden: true,
     onsubmit: async (e) => {
       e.preventDefault();
-      confirmError.textContent = '';
-      const button = codeForm.querySelector('button[type=submit]');
+      error.textContent = '';
+      const button = form.querySelector('button[type=submit]');
       button.disabled = true;
       try {
-        const body = Object.fromEntries(new FormData(codeForm));
-        if (body.pin !== body.confirmPin) throw new Error('The PINs do not match.');
+        const body = Object.fromEntries(new FormData(form));
+        if (body.newPin !== body.confirmPin) throw new Error('The PINs do not match.');
         delete body.confirmPin;
-        await api('POST', '/api/password-reset/confirm', body);
-        toast('PIN updated. Log in with your new PIN.');
-        location.hash = '#/login';
-      } catch (error) {
-        confirmError.textContent = error.message;
+        me = (await api('POST', '/api/me/change-pin', body)).user;
+        await loadConvs();
+        connectSocket();
+        toast('PIN changed.');
+        location.hash = '#/chats';
+      } catch (e2) {
+        error.textContent = e2.message;
       } finally {
         button.disabled = false;
       }
     },
   },
-  h('input', { type: 'hidden', name: 'phone' }),
-  field('Verification code', h('input', {
-    name: 'code', inputmode: 'numeric', autocomplete: 'one-time-code',
-    required: true, maxlength: 10,
+  field('Temporary PIN', h('input', {
+    name: 'currentPin', type: 'password', inputmode: 'numeric',
+    autocomplete: 'current-password', required: true, minlength: 4, maxlength: 6,
   })),
-  field('New 4–6 digit PIN', h('input', {
-    name: 'pin', type: 'password', inputmode: 'numeric',
+  field('Choose a new 4–6 digit PIN', h('input', {
+    name: 'newPin', type: 'password', inputmode: 'numeric',
     autocomplete: 'new-password', required: true, minlength: 4, maxlength: 6,
   })),
   field('Confirm new PIN', h('input', {
     name: 'confirmPin', type: 'password', inputmode: 'numeric',
     autocomplete: 'new-password', required: true, minlength: 4, maxlength: 6,
   })),
-  confirmError,
-  h('button', { class: 'btn primary', type: 'submit' }, 'Reset PIN'));
+  error,
+  h('button', { class: 'btn primary', type: 'submit' }, 'Set new PIN'),
+  h('button', { class: 'btn', type: 'button', onclick: () => logout() }, 'Log out'));
 
-  layout('Forgot PIN?', h('div', { class: 'auth pad' },
-    info,
-    phoneForm,
-    codeForm,
-    h('p', { class: 'center small' }, h('a', { href: '#/login' }, 'Back to log in'))),
-  { back: '#/login', nav: false });
+  layout('Choose a new PIN', h('div', { class: 'auth pad' },
+    h('p', { class: 'muted small' }, 'Your administrator gave you a temporary PIN. Change it before using Apaaman.'),
+    form),
+  { nav: false });
+}
+
+function renderAdminUsers(alive) {
+  if (!me.is_admin) {
+    layout('Admin access required', h('div', { class: 'pad' },
+      h('p', { class: 'muted' }, 'Only an administrator can reset account PINs.')),
+    { back: '#/me' });
+    return;
+  }
+
+  const error = h('p', { class: 'error' });
+  const results = h('ul', { class: 'list' });
+  let searchSeq = 0;
+  let timer;
+  const query = h('input', {
+    type: 'search', class: 'search', placeholder: 'Search by name or phone',
+    maxlength: 60,
+    oninput: () => {
+      clearTimeout(timer);
+      timer = setTimeout(search, 250);
+    },
+  });
+  async function search() {
+    const seq = ++searchSeq;
+    const value = query.value.trim();
+    error.textContent = '';
+    if (value.length < 2) {
+      results.replaceChildren();
+      return;
+    }
+    try {
+      const { users } = await api('GET', `/api/admin/users?q=${encodeURIComponent(value)}`);
+      if (!alive() || seq !== searchSeq) return;
+      results.replaceChildren(...(users.length ? users.map(renderAccount) : [
+        h('li', { class: 'row muted' }, 'No matching accounts.'),
+      ]));
+    } catch (e) {
+      if (alive() && seq === searchSeq) error.textContent = e.message;
+    }
+  }
+  function renderAccount(user) {
+    const result = h('p', { class: 'muted small', role: 'status' });
+    const button = h('button', {
+      class: 'btn danger small',
+      onclick: safe(async () => {
+        if (!confirm(`Reset the PIN for ${user.name} (${user.phone})? Verify their identity first.`)) return;
+        button.disabled = true;
+        try {
+          const { temporaryPin } = await api('POST', `/api/admin/users/${user.id}/reset-pin`, {});
+          result.className = 'admin-pin-result';
+          result.textContent = `Temporary PIN: ${temporaryPin}. Share it privately; they must change it when they sign in.`;
+        } finally {
+          button.disabled = false;
+        }
+      }),
+    }, 'Reset PIN');
+    return h('li', { class: 'admin-account' },
+      h('div', { class: 'row-top' },
+        h('strong', {}, user.name),
+        user.is_admin ? h('span', { class: 'muted small' }, 'Admin') : null),
+      h('div', { class: 'muted small' }, [user.phone, user.area].filter(Boolean).join(' · ')),
+      h('div', { class: 'btn-row' }, button),
+      result);
+  }
+
+  layout('Admin PIN resets', h('div', { class: 'pad' },
+    h('p', { class: 'muted small' }, 'Verify the account holder using a trusted channel before resetting. The temporary PIN is shown once; share it privately.'),
+    field('Find account', query),
+    error,
+    results),
+  { back: '#/me', nav: false });
 }
 
 // ------------------------------------------------------------ screens: chats
@@ -937,6 +994,9 @@ async function renderMe(alive) {
     h('div', { class: 'profile' }, avatarBtn, h('h2', {}, me.name), h('div', { class: 'muted' }, me.phone)),
     navigator.standalone || matchMedia('(display-mode: standalone)').matches ? null : installBtn,
     form,
+    me.is_admin
+      ? h('a', { class: 'btn block', href: '#/admin' }, 'Admin: reset member PINs')
+      : null,
     h('div', { class: 'section' }, h('h3', {}, 'My listings'),
       listings.length
         ? h('div', { class: 'grid' }, listings.map(listingCard))

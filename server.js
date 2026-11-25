@@ -17,6 +17,7 @@ const CATEGORIES = ['Crops & Food', 'Livestock', 'Tools & Equipment', 'Household
 const IMAGE_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const UPLOAD_RE = /^\/uploads\/[a-f0-9]{32}\.(jpg|png|webp|gif)$/;
 const USER_COLS = 'u.id, u.phone, u.name, u.role, u.area, u.bio, u.avatar, u.created_at';
+const AUTH_USER_COLS = `${USER_COLS}, u.pin_reset_required, u.is_admin`;
 
 const app = express();
 const server = http.createServer(app);
@@ -36,12 +37,15 @@ const fail = (message, status) => { throw new UserError(message, status); };
 const text = (v, max) => String(v ?? '').trim().slice(0, max);
 const normPhone = (v) => String(v ?? '').replace(/[^\d+]/g, '').slice(0, 20);
 const hashPin = (pin, salt) => crypto.scryptSync(pin, salt, 64).toString('hex');
+const pinMatches = (pin, salt, hash) =>
+  crypto.timingSafeEqual(Buffer.from(hashPin(pin, salt), 'hex'), Buffer.from(hash, 'hex'));
 const imageOrNull = (v) => {
   if (!v) return null;
   if (typeof v !== 'string' || !UPLOAD_RE.test(v)) fail('Invalid image.');
   return v;
 };
-const getUser = (id) => db.get(`SELECT ${USER_COLS} FROM users u WHERE u.id = ?`, id);
+const getUser = (id, includePinReset = false) =>
+  db.get(`SELECT ${includePinReset ? AUTH_USER_COLS : USER_COLS} FROM users u WHERE u.id = ?`, id);
 
 // Wraps a handler: return value is sent as JSON, thrown errors go to the error handler.
 const handle = (fn) => (req, res, next) => {
@@ -50,30 +54,33 @@ const handle = (fn) => (req, res, next) => {
     if (out !== undefined) res.json(out);
   } catch (err) { next(err); }
 };
-const handleAsync = (fn) => (req, res, next) => {
-  Promise.resolve().then(() => fn(req, res)).then((out) => {
-    if (out !== undefined) res.json(out);
-  }).catch(next);
-};
-
 function userByToken(token) {
   if (typeof token !== 'string' || !token) return null;
   return db.get(
-    `SELECT ${USER_COLS} FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`, token);
+    `SELECT ${AUTH_USER_COLS} FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`, token);
 }
 
 function auth(req, res, next) {
   const header = req.get('authorization') || '';
   const user = header.startsWith('Bearer ') ? userByToken(header.slice(7)) : null;
   if (!user) return res.status(401).json({ error: 'Please log in again.' });
+  if (user.pin_reset_required &&
+      !['/api/me', '/api/me/change-pin', '/api/logout'].includes(req.path)) {
+    return res.status(403).json({ error: 'Change your temporary PIN before continuing.' });
+  }
   req.user = user;
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.user.is_admin) return res.status(403).json({ error: 'Admin access required.' });
   next();
 }
 
 function startSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
   db.run('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)', token, userId, Date.now());
-  return { token, user: getUser(userId) };
+  return { token, user: getUser(userId, true) };
 }
 
 // Simple protection against guessing PINs: 5 wrong tries locks the number for 5 minutes.
@@ -89,88 +96,40 @@ function recordFailure(phone) {
   attempts.set(phone, a);
 }
 
-const resetRequests = new Map();
-const RESET_REQUEST_COOLDOWN_MS = 60 * 1000;
-const e164Phone = (value) => {
-  const phone = normPhone(value);
-  if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
-    fail('Enter your phone number in international format, including the + and country code.');
-  }
-  return phone;
-};
-function twilioVerifyConfig() {
-  const config = {
-    accountSid: process.env.TWILIO_ACCOUNT_SID,
-    authToken: process.env.TWILIO_AUTH_TOKEN,
-    serviceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
-  };
-  if (!config.accountSid || !config.authToken || !config.serviceSid) {
-    fail('PIN recovery is not configured yet. Please contact the community administrator.', 503);
-  }
-  return config;
-}
-async function twilioVerify(config, endpoint, params) {
-  let response;
-  try {
-    response = await fetch(
-      `https://verify.twilio.com/v2/Services/${encodeURIComponent(config.serviceSid)}/${endpoint}`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString('base64')}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams(params),
-      });
-  } catch (err) {
-    console.error('Twilio Verify network request failed:', err);
-    fail('PIN recovery service is temporarily unavailable. Please try again later.', 503);
-  }
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    console.error('Twilio Verify request failed:', response.status, result.code || 'unknown');
-    if (response.status === 429) fail('Too many verification attempts. Please wait and try again.', 429);
-    fail('Could not complete PIN recovery. Check your phone number and try again later.', 503);
-  }
-  return result;
-}
-
-app.post('/api/password-reset/request', handleAsync(async (req) => {
-  const phone = e164Phone(req.body?.phone);
-  const config = twilioVerifyConfig();
-  const now = Date.now();
-  for (const [number, requestedAt] of resetRequests) {
-    if (now - requestedAt >= RESET_REQUEST_COOLDOWN_MS) resetRequests.delete(number);
-  }
-  if (resetRequests.has(phone)) fail('Wait a minute before requesting another code.', 429);
-  if (resetRequests.size >= 10000) resetRequests.delete(resetRequests.keys().next().value);
-  resetRequests.set(phone, now);
-
-  const user = db.get('SELECT id FROM users WHERE phone = ?', phone);
-  if (!user) return { message: 'If that number belongs to an account, a verification code will be sent.' };
-  await twilioVerify(config, 'Verifications', { To: phone, Channel: 'sms' });
-  return { message: 'If that number belongs to an account, a verification code will be sent.' };
+app.get('/api/admin/users', auth, requireAdmin, handle((req) => {
+  const query = text(req.query.q, 60);
+  if (!query) return { users: [] };
+  const namePattern = `%${query}%`;
+  const phoneQuery = /\d/.test(query) ? `%${normPhone(query)}%` : null;
+  const users = phoneQuery
+    ? db.all(
+      `SELECT id, phone, name, role, area, is_admin FROM users
+       WHERE id <> ? AND (name LIKE ? COLLATE NOCASE OR phone LIKE ?)
+       ORDER BY name COLLATE NOCASE LIMIT 50`, req.user.id, namePattern, phoneQuery)
+    : db.all(
+      `SELECT id, phone, name, role, area, is_admin FROM users
+       WHERE id <> ? AND name LIKE ? COLLATE NOCASE
+       ORDER BY name COLLATE NOCASE LIMIT 50`, req.user.id, namePattern);
+  return { users };
 }));
 
-app.post('/api/password-reset/confirm', handleAsync(async (req) => {
-  const phone = e164Phone(req.body?.phone);
-  const code = text(req.body?.code, 10);
-  const pin = String(req.body?.pin ?? '');
-  if (!/^\d{4,10}$/.test(code)) fail('Enter the verification code from your text message.');
-  if (!/^\d{4,6}$/.test(pin)) fail('Your new PIN must be 4 to 6 digits.');
+app.post('/api/admin/users/:id/reset-pin', auth, requireAdmin, handle((req) => {
+  const userId = Number(req.params.id);
+  if (!Number.isSafeInteger(userId) || userId < 1) fail('Account not found.', 404);
+  const user = db.get('SELECT id FROM users WHERE id = ?', userId);
+  if (!user) fail('Account not found.', 404);
+  if (user.id === req.user.id) fail('Use your profile to change your own PIN.', 400);
 
-  const config = twilioVerifyConfig();
-  const result = await twilioVerify(config, 'VerificationCheck', { To: phone, Code: code });
-  const user = db.get('SELECT id FROM users WHERE phone = ?', phone);
-  if (!user || result.status !== 'approved') fail('That code is invalid or expired. Request a new one.');
-
+  const temporaryPin = String(crypto.randomInt(100000, 1000000));
   const salt = crypto.randomBytes(16).toString('hex');
   db.transaction(() => {
-    db.run('UPDATE users SET pin_hash = ?, salt = ? WHERE id = ?', hashPin(pin, salt), salt, user.id);
-    db.run('DELETE FROM sessions WHERE user_id = ?', user.id);
+    db.run(
+      'UPDATE users SET pin_hash = ?, salt = ?, pin_reset_required = 1 WHERE id = ?',
+      hashPin(temporaryPin, salt), salt, userId);
+    db.run('DELETE FROM sessions WHERE user_id = ?', userId);
   });
-  resetRequests.delete(phone);
-  return { ok: true };
+  io.in(`user:${userId}`).disconnectSockets(true);
+  return { temporaryPin };
 }));
 
 function isMember(conversationId, userId) {
@@ -233,7 +192,7 @@ app.post('/api/login', handle((req) => {
   const pin = String(req.body.pin ?? '');
   checkLock(phone);
   const row = db.get('SELECT id, pin_hash, salt FROM users WHERE phone = ?', phone);
-  const ok = row && crypto.timingSafeEqual(Buffer.from(hashPin(pin, row.salt), 'hex'), Buffer.from(row.pin_hash, 'hex'));
+  const ok = row && pinMatches(pin, row.salt, row.pin_hash);
   if (!ok) { recordFailure(phone); fail('Wrong phone number or PIN.'); }
   attempts.delete(phone);
   return startSession(row.id);
@@ -246,13 +205,35 @@ app.post('/api/logout', auth, handle((req) => {
 
 app.get('/api/me', auth, handle((req) => ({ user: req.user })));
 
+app.post('/api/me/change-pin', auth, handle((req) => {
+  const currentPin = String(req.body?.currentPin ?? '');
+  const newPin = String(req.body?.newPin ?? '');
+  if (!/^\d{4,6}$/.test(currentPin)) fail('Enter your current PIN.');
+  if (!/^\d{4,6}$/.test(newPin)) fail('Your new PIN must be 4 to 6 digits.');
+  if (currentPin === newPin) fail('Choose a different PIN.');
+
+  const account = db.get('SELECT pin_hash, salt FROM users WHERE id = ?', req.user.id);
+  if (!pinMatches(currentPin, account.salt, account.pin_hash)) fail('Your current PIN is incorrect.');
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const token = req.get('authorization').slice(7);
+  db.transaction(() => {
+    db.run(
+      'UPDATE users SET pin_hash = ?, salt = ?, pin_reset_required = 0 WHERE id = ?',
+      hashPin(newPin, salt), salt, req.user.id);
+    db.run('DELETE FROM sessions WHERE user_id = ? AND token <> ?', req.user.id, token);
+  });
+  io.in(`user:${req.user.id}`).disconnectSockets(true);
+  return { user: getUser(req.user.id, true) };
+}));
+
 app.put('/api/me', auth, handle((req) => {
   const name = text(req.body.name, 40);
   if (!name) fail('Please enter your name.');
   db.run('UPDATE users SET name = ?, role = ?, area = ?, bio = ?, avatar = ? WHERE id = ?',
     name, text(req.body.role, 40), text(req.body.area, 40), text(req.body.bio, 300),
     imageOrNull(req.body.avatar), req.user.id);
-  return { user: getUser(req.user.id) };
+  return { user: getUser(req.user.id, true) };
 }));
 
 // ---------------------------------------------------------------- directory
@@ -500,7 +481,7 @@ app.use((err, req, res, next) => {
 // ---------------------------------------------------------------- realtime
 io.use((socket, next) => {
   const user = userByToken(socket.handshake.auth?.token);
-  if (!user) return next(new Error('unauthorized'));
+  if (!user || user.pin_reset_required) return next(new Error('unauthorized'));
   socket.user = user;
   next();
 });
