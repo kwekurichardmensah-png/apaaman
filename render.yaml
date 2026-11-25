@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: apaaman
+    runtime: node
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /
+    disk:
+      name: apaaman-storage
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.0
+      - key: APAAMAN_STORAGE_DIR
+        value: /opt/render/project/src/storage

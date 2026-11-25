@@ -5,7 +5,8 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 
-const dir = path.join(__dirname, 'data');
+const storageRoot = process.env.APAAMAN_STORAGE_DIR || __dirname;
+const dir = path.join(storageRoot, 'data');
 fs.mkdirSync(dir, { recursive: true });
 
 const db = new DatabaseSync(path.join(dir, 'apaaman.db'));

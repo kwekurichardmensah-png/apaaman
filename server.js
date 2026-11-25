@@ -9,7 +9,8 @@ const { Server } = require('socket.io');
 const db = require('./db');
 
 const PORT = Number(process.env.PORT) || 3000;
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+const storageRoot = process.env.APAAMAN_STORAGE_DIR || __dirname;
+const UPLOAD_DIR = path.join(storageRoot, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const CATEGORIES = ['Crops & Food', 'Livestock', 'Tools & Equipment', 'Household', 'Services', 'Other'];
