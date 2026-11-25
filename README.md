@@ -21,6 +21,10 @@ On a new installation, optionally set `APAAMAN_ADMIN_PHONE` and `APAAMAN_ADMIN_P
 
 The SQLite database and uploaded images are stored locally in `data/` and `uploads/`. Back them up, and use persistent storage when deploying. Set `APAAMAN_STORAGE_DIR` to the mounted disk's path to keep both directories on that disk.
 
+## SMS PIN recovery
+
+The login screen provides PIN recovery by SMS. To enable it, configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID` as private environment variables in Render. Never commit these values. Recovery phone numbers must be in international `+` format and match the number saved on the account.
+
 ## Deploy to Render
 
 The root `render.yaml` configures a Node web service in Frankfurt with a 1 GB persistent disk for the database and uploaded photos. Create a Blueprint in Render from this repository and review the service and disk charges before applying it. Set any admin bootstrap credentials in Render's private environment settings, not in this repository.

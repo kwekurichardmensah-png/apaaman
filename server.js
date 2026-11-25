@@ -50,6 +50,11 @@ const handle = (fn) => (req, res, next) => {
     if (out !== undefined) res.json(out);
   } catch (err) { next(err); }
 };
+const handleAsync = (fn) => (req, res, next) => {
+  Promise.resolve().then(() => fn(req, res)).then((out) => {
+    if (out !== undefined) res.json(out);
+  }).catch(next);
+};
 
 function userByToken(token) {
   if (typeof token !== 'string' || !token) return null;
@@ -83,6 +88,90 @@ function recordFailure(phone) {
   if (a.count >= 5) { a.count = 0; a.until = Date.now() + 5 * 60 * 1000; }
   attempts.set(phone, a);
 }
+
+const resetRequests = new Map();
+const RESET_REQUEST_COOLDOWN_MS = 60 * 1000;
+const e164Phone = (value) => {
+  const phone = normPhone(value);
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+    fail('Enter your phone number in international format, including the + and country code.');
+  }
+  return phone;
+};
+function twilioVerifyConfig() {
+  const config = {
+    accountSid: process.env.TWILIO_ACCOUNT_SID,
+    authToken: process.env.TWILIO_AUTH_TOKEN,
+    serviceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
+  };
+  if (!config.accountSid || !config.authToken || !config.serviceSid) {
+    fail('PIN recovery is not configured yet. Please contact the community administrator.', 503);
+  }
+  return config;
+}
+async function twilioVerify(config, endpoint, params) {
+  let response;
+  try {
+    response = await fetch(
+      `https://verify.twilio.com/v2/Services/${encodeURIComponent(config.serviceSid)}/${endpoint}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(params),
+      });
+  } catch (err) {
+    console.error('Twilio Verify network request failed:', err);
+    fail('PIN recovery service is temporarily unavailable. Please try again later.', 503);
+  }
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    console.error('Twilio Verify request failed:', response.status, result.code || 'unknown');
+    if (response.status === 429) fail('Too many verification attempts. Please wait and try again.', 429);
+    fail('Could not complete PIN recovery. Check your phone number and try again later.', 503);
+  }
+  return result;
+}
+
+app.post('/api/password-reset/request', handleAsync(async (req) => {
+  const phone = e164Phone(req.body?.phone);
+  const config = twilioVerifyConfig();
+  const now = Date.now();
+  for (const [number, requestedAt] of resetRequests) {
+    if (now - requestedAt >= RESET_REQUEST_COOLDOWN_MS) resetRequests.delete(number);
+  }
+  if (resetRequests.has(phone)) fail('Wait a minute before requesting another code.', 429);
+  if (resetRequests.size >= 10000) resetRequests.delete(resetRequests.keys().next().value);
+  resetRequests.set(phone, now);
+
+  const user = db.get('SELECT id FROM users WHERE phone = ?', phone);
+  if (!user) return { message: 'If that number belongs to an account, a verification code will be sent.' };
+  await twilioVerify(config, 'Verifications', { To: phone, Channel: 'sms' });
+  return { message: 'If that number belongs to an account, a verification code will be sent.' };
+}));
+
+app.post('/api/password-reset/confirm', handleAsync(async (req) => {
+  const phone = e164Phone(req.body?.phone);
+  const code = text(req.body?.code, 10);
+  const pin = String(req.body?.pin ?? '');
+  if (!/^\d{4,10}$/.test(code)) fail('Enter the verification code from your text message.');
+  if (!/^\d{4,6}$/.test(pin)) fail('Your new PIN must be 4 to 6 digits.');
+
+  const config = twilioVerifyConfig();
+  const result = await twilioVerify(config, 'VerificationCheck', { To: phone, Code: code });
+  const user = db.get('SELECT id FROM users WHERE phone = ?', phone);
+  if (!user || result.status !== 'approved') fail('That code is invalid or expired. Request a new one.');
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  db.transaction(() => {
+    db.run('UPDATE users SET pin_hash = ?, salt = ? WHERE id = ?', hashPin(pin, salt), salt, user.id);
+    db.run('DELETE FROM sessions WHERE user_id = ?', user.id);
+  });
+  resetRequests.delete(phone);
+  return { ok: true };
+}));
 
 function isMember(conversationId, userId) {
   return !!db.get('SELECT 1 FROM members WHERE conversation_id = ? AND user_id = ?', conversationId, userId);

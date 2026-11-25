@@ -191,6 +191,8 @@ textarea { resize: vertical; }
 .brand img { margin: 0 auto 12px; border-radius: 18px; }
 .brand h1 { font-size: 30px; color: var(--green); }
 .auth-card { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.auth-card[hidden] { display: none; }
+.forgot-link { text-align: right; margin: -4px 2px 0; font-size: 14px; }
 
 /* ---------- lists ---------- */
 .list { list-style: none; margin: 0; padding: 0; background: var(--card); }

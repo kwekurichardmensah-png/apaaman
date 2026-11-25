@@ -251,7 +251,7 @@ async function render() {
   const alive = () => seq === renderSeq;
   chat = null;
 
-  if (!token) return renderAuth('login');
+  if (!token) return route().name === 'forgot-pin' ? renderForgotPin() : renderAuth('login');
   try {
     if (!me) {
       me = (await api('GET', '/api/me')).user;
@@ -325,6 +325,7 @@ function renderAuth(mode) {
     },
   },
   ...fields,
+  login ? h('p', { class: 'forgot-link' }, h('a', { href: '#/forgot-pin' }, 'Forgot PIN?')) : null,
   err,
   h('button', { class: 'btn primary', type: 'submit' }, login ? 'Log in' : 'Create account'),
   h('p', { class: 'muted center' }, login ? 'New here? ' : 'Already have an account? ',
@@ -337,6 +338,86 @@ function renderAuth(mode) {
       h('h1', {}, 'Apaaman'),
       h('p', { class: 'muted' }, 'Chat, trade and travel with your village')),
     form));
+}
+
+function renderForgotPin() {
+  const requestError = h('p', { class: 'error' });
+  const confirmError = h('p', { class: 'error' });
+  const info = h('p', { class: 'muted small' },
+    'Enter the phone number on your account in international format, including + and country code.');
+  const phoneForm = h('form', {
+    class: 'card auth-card',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      requestError.textContent = '';
+      const button = phoneForm.querySelector('button[type=submit]');
+      button.disabled = true;
+      try {
+        const { message: result } = await api('POST', '/api/password-reset/request', {
+          phone: new FormData(phoneForm).get('phone'),
+        });
+        info.textContent = result;
+        phoneForm.hidden = true;
+        codeForm.hidden = false;
+        codeForm.querySelector('[name=phone]').value = phoneForm.elements.phone.value;
+      } catch (error) {
+        requestError.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    },
+  },
+  field('Phone number', h('input', {
+    name: 'phone', type: 'tel', autocomplete: 'tel', required: true,
+    maxlength: 20, placeholder: '+233…',
+  })),
+  requestError,
+  h('button', { class: 'btn primary', type: 'submit' }, 'Send verification code'));
+
+  const codeForm = h('form', {
+    class: 'card auth-card',
+    hidden: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      confirmError.textContent = '';
+      const button = codeForm.querySelector('button[type=submit]');
+      button.disabled = true;
+      try {
+        const body = Object.fromEntries(new FormData(codeForm));
+        if (body.pin !== body.confirmPin) throw new Error('The PINs do not match.');
+        delete body.confirmPin;
+        await api('POST', '/api/password-reset/confirm', body);
+        toast('PIN updated. Log in with your new PIN.');
+        location.hash = '#/login';
+      } catch (error) {
+        confirmError.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    },
+  },
+  h('input', { type: 'hidden', name: 'phone' }),
+  field('Verification code', h('input', {
+    name: 'code', inputmode: 'numeric', autocomplete: 'one-time-code',
+    required: true, maxlength: 10,
+  })),
+  field('New 4–6 digit PIN', h('input', {
+    name: 'pin', type: 'password', inputmode: 'numeric',
+    autocomplete: 'new-password', required: true, minlength: 4, maxlength: 6,
+  })),
+  field('Confirm new PIN', h('input', {
+    name: 'confirmPin', type: 'password', inputmode: 'numeric',
+    autocomplete: 'new-password', required: true, minlength: 4, maxlength: 6,
+  })),
+  confirmError,
+  h('button', { class: 'btn primary', type: 'submit' }, 'Reset PIN'));
+
+  layout('Forgot PIN?', h('div', { class: 'auth pad' },
+    info,
+    phoneForm,
+    codeForm,
+    h('p', { class: 'center small' }, h('a', { href: '#/login' }, 'Back to log in'))),
+  { back: '#/login', nav: false });
 }
 
 // ------------------------------------------------------------ screens: chats
